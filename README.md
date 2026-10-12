@@ -1,5 +1,5 @@
 # prettyprint
-stable diffusion (but worse)
+stable diffusion
 
 thanks to (resources)
 
