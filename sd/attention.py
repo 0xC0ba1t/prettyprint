@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .blocks import group_norm
+from typing import Optional
 
 
 class VAEAttnBlock(nn.Module):
@@ -67,3 +68,46 @@ class FeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+class BasicTransformerBlock(nn.Module):
+    """self-attn -> cross-attn (text) -> GEGLU feed-forward, each with pre-LayerNorm + residual."""
+
+    def __init__(self, dim: int, heads: int, head_dim: int, context_dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn1 = CrossAttention(dim, None, heads, head_dim, dropout)
+        self.norm2 = nn.LayerNorm(dim)
+        self.attn2 = CrossAttention(dim, context_dim, heads, head_dim, dropout)
+        self.norm3 = nn.LayerNorm(dim)
+        self.ff = FeedForward(dim, dropout=dropout)
+
+    def forward(self, x: torch.Tensor, context: Optional[torch.Tensor]) -> torch.Tensor:
+        x = x + self.attn1(self.norm1(x))
+        x = x + self.attn2(self.norm2(x), context)
+        return x + self.ff(self.norm3(x))
+
+
+class SpatialTransformer(nn.Module):
+    """Applies transformer blocks over the flattened feature map of a (B, C, H, W) tensor."""
+
+    def __init__(self, channels: int, head_dim: int, context_dim: int, depth: int = 1, groups: int = 32, dropout: float = 0.0):
+        super().__init__()
+        heads = max(1, channels // head_dim)
+        inner = heads * head_dim
+        self.norm = group_norm(channels, groups)
+        self.proj_in = nn.Conv2d(channels, inner, 1)
+        self.blocks = nn.ModuleList(
+            [BasicTransformerBlock(inner, heads, head_dim, context_dim, dropout) for _ in range(depth)]
+        )
+        self.proj_out = nn.Conv2d(inner, channels, 1)
+        nn.init.zeros_(self.proj_out.weight)  # block starts as identity, stabilising early training
+        nn.init.zeros_(self.proj_out.bias)
+
+    def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None) -> torch.Tensor:
+        b, c, h, w = x.shape
+        y = self.proj_in(self.norm(x)).flatten(2).transpose(1, 2)  # (b, hw, inner)
+        for block in self.blocks:
+            y = block(y, context)
+        y = y.transpose(1, 2).reshape(b, -1, h, w)
+        return x + self.proj_out(y)
