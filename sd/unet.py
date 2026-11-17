@@ -9,6 +9,7 @@ from .attention import SpatialTransformer
 from .blocks import Downsample, ResnetBlock, Upsample, group_norm
 from .config import UNetConfig
 from .embeddings import TimestepEmbedder
+from torch.utils.checkpoint import checkpoint
 
 
 class UNet(nn.Module):
@@ -76,6 +77,8 @@ class UNet(nn.Module):
         return h
 
     def _run(self, block: nn.ModuleList, h: torch.Tensor, temb: torch.Tensor, context: Optional[torch.Tensor]):
+        if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+            return checkpoint(self._apply_block, block, h, temb, context, use_reentrant=False)
         return self._apply_block(block, h, temb, context)
 
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor, context: Optional[torch.Tensor] = None) -> torch.Tensor:
