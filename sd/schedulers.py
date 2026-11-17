@@ -122,7 +122,23 @@ class Sampler:
         raise NotImplementedError
 
 
-SAMPLERS = {}
+class DDPMSampler(Sampler):
+    """Ancestral sampling from the true posterior q(x_{t-1} | x_t, x_0)."""
+
+    def step(self, model_output, t, sample, generator=None):
+        t_prev = self.prev_timestep(t)
+        acp_t, acp_prev = self.schedule.alpha_bar(t), self.schedule.alpha_bar(t_prev)
+        alpha_t = acp_t / acp_prev  # effective alpha over the (possibly strided) step
+        beta_t = 1.0 - alpha_t
+        x0, _ = self.schedule.predict_x0_eps(model_output, sample, t)
+        mean = (math.sqrt(acp_prev) * beta_t / (1 - acp_t)) * x0 + (math.sqrt(alpha_t) * (1 - acp_prev) / (1 - acp_t)) * sample
+        if t_prev < 0:
+            return mean
+        variance = max((1 - acp_prev) / (1 - acp_t) * beta_t, 1e-20)
+        return mean + math.sqrt(variance) * randn_like(sample, generator)
+
+
+SAMPLERS = {"ddpm": DDPMSampler}
 
 
 def make_sampler(name: str, schedule: NoiseSchedule, **kwargs) -> Sampler:
