@@ -29,6 +29,18 @@ def make_betas(schedule: str, num_timesteps: int, beta_start: float, beta_end: f
     return betas
 
 
+def rescale_zero_terminal_snr(betas: torch.Tensor) -> torch.Tensor:
+    """Rescale betas so the last step has exactly zero SNR (Lin et al. 2023, 'Common Diffusion Noise
+    Schedules and Sample Steps are Flawed'). Fixes the train/inference mismatch at t = T and lets the
+    model generate very dark / very bright images."""
+    alphas_bar_sqrt = torch.cumprod(1.0 - betas, dim=0).sqrt()
+    first, last = alphas_bar_sqrt[0].clone(), alphas_bar_sqrt[-1].clone()
+    alphas_bar_sqrt = (alphas_bar_sqrt - last) * first / (first - last)
+    alphas_bar = alphas_bar_sqrt**2
+    alphas = torch.cat([alphas_bar[:1], alphas_bar[1:] / alphas_bar[:-1]])
+    return 1.0 - alphas
+
+
 class NoiseSchedule:
     """Holds the cumulative alphas and implements the forward process q(x_t | x_0)."""
 
@@ -39,6 +51,10 @@ class NoiseSchedule:
         if self.prediction_type not in ("epsilon", "v_prediction"):
             raise ValueError(f"Unknown prediction type: {self.prediction_type}")
         betas = make_betas(cfg.beta_schedule, cfg.num_timesteps, cfg.beta_start, cfg.beta_end)
+        if cfg.zero_terminal_snr:
+            if self.prediction_type != "v_prediction":
+                raise ValueError("zero_terminal_snr requires prediction_type='v_prediction'")
+            betas = rescale_zero_terminal_snr(betas)
         self.betas = betas.float()
         self.alphas_cumprod = torch.cumprod(1.0 - betas, dim=0)  # float64 for accurate scalar lookups
 
