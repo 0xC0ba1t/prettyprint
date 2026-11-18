@@ -157,7 +157,39 @@ class DDIMSampler(Sampler):
         return out
 
 
-SAMPLERS = {"ddpm": DDPMSampler, "ddim": DDIMSampler}
+class DPMSolverPP2M(Sampler):
+    """DPM-Solver++ (2M): second-order multistep solver on the data-prediction ODE (Lu et al. 2022).
+
+    Reaches DDIM(50)-level quality in roughly 15-25 steps, which matters for T4 inference time.
+    """
+
+    def reset(self) -> None:
+        self._prev_x0: Optional[torch.Tensor] = None
+        self._prev_lambda: Optional[float] = None
+
+    def step(self, model_output, t, sample, generator=None):
+        t_prev = self.prev_timestep(t)
+        x0, _ = self.schedule.predict_x0_eps(model_output, sample, t)
+        if t_prev < 0:  # the last step lands exactly on the denoised estimate
+            return x0
+        acp_t, acp_prev = self.schedule.alpha_bar(t), self.schedule.alpha_bar(t_prev)
+        a_t, s_t = math.sqrt(acp_t), math.sqrt(1 - acp_t)
+        a_p, s_p = math.sqrt(acp_prev), math.sqrt(1 - acp_prev)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lam_t = float(np.log(a_t) - np.log(s_t))  # log-SNR; -inf at zero terminal SNR
+            lam_p = float(np.log(a_p) - np.log(s_p))
+            h = lam_p - lam_t
+            phi = float(np.expm1(-h))  # e^{-h} - 1
+            out = (s_p / s_t) * sample - a_p * phi * x0
+            if self._prev_x0 is not None:
+                r = (lam_t - self._prev_lambda) / h
+                d1 = (x0 - self._prev_x0) / r if np.isfinite(r) and r != 0 else torch.zeros_like(x0)
+                out = out - 0.5 * a_p * phi * d1
+        self._prev_x0, self._prev_lambda = x0, lam_t
+        return out
+
+
+SAMPLERS = {"ddpm": DDPMSampler, "ddim": DDIMSampler, "dpmpp": DPMSolverPP2M}
 
 
 def make_sampler(name: str, schedule: NoiseSchedule, **kwargs) -> Sampler:
