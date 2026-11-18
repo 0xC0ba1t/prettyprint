@@ -138,7 +138,26 @@ class DDPMSampler(Sampler):
         return mean + math.sqrt(variance) * randn_like(sample, generator)
 
 
-SAMPLERS = {"ddpm": DDPMSampler}
+class DDIMSampler(Sampler):
+    """Denoising Diffusion Implicit Models: deterministic for eta=0, DDPM-like variance for eta=1."""
+
+    def __init__(self, schedule: NoiseSchedule, eta: float = 0.0):
+        super().__init__(schedule)
+        self.eta = eta
+
+    def step(self, model_output, t, sample, generator=None):
+        t_prev = self.prev_timestep(t)
+        acp_t, acp_prev = self.schedule.alpha_bar(t), self.schedule.alpha_bar(t_prev)
+        x0, eps = self.schedule.predict_x0_eps(model_output, sample, t)
+        sigma = self.eta * math.sqrt((1 - acp_prev) / (1 - acp_t)) * math.sqrt(1 - acp_t / acp_prev)
+        direction = math.sqrt(max(1 - acp_prev - sigma**2, 0.0)) * eps
+        out = math.sqrt(acp_prev) * x0 + direction
+        if sigma > 0:
+            out = out + sigma * randn_like(sample, generator)
+        return out
+
+
+SAMPLERS = {"ddpm": DDPMSampler, "ddim": DDIMSampler}
 
 
 def make_sampler(name: str, schedule: NoiseSchedule, **kwargs) -> Sampler:
