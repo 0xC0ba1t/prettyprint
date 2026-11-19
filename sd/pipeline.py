@@ -154,3 +154,41 @@ class LatentDiffusionPipeline:
         latents = self._initial_noise(len(prompts), generator)
         latents = self._denoise(latents, solver, timesteps, cond, uncond, guidance_scale, generator, callback)
         return latents if return_latents else self._decode(latents)
+
+    # ------------------------------------------------------------------ image -> image
+    @torch.no_grad()
+    def _encode_image(self, image: Image.Image, n: int, generator) -> torch.Tensor:
+        x = pil_to_tensor(fit_image(image, self.image_size)).unsqueeze(0).to(self.device)
+        with self._autocast():
+            z = self.vae.encode(x).mode().float() * self.vae.scale_factor
+        return z.expand(n, -1, -1, -1).contiguous()
+
+    @torch.no_grad()
+    def img2img(
+        self,
+        prompt: Prompt,
+        image: Image.Image,
+        strength: float = 0.7,
+        negative_prompt: Prompt = "",
+        num_images: int = 1,
+        num_inference_steps: int = 30,
+        guidance_scale: float = 5.0,
+        sampler: str = "dpmpp",
+        seed: Optional[int] = None,
+        callback=None,
+    ) -> List[Image.Image]:
+        """Noise the encoded input to `strength` of the schedule, then denoise it under the new prompt."""
+        if not 0.0 <= strength <= 1.0:
+            raise ValueError("strength must be in [0, 1]")
+        prompts = self._as_list(prompt, num_images)
+        cond, uncond = self.encode_prompts(prompts, negative_prompt)
+        generator = self._generator(seed)
+        solver = make_sampler(sampler, self.schedule)
+        solver.set_timesteps(num_inference_steps)
+        timesteps = solver.timesteps_for_strength(strength)
+        init = self._encode_image(image, len(prompts), generator)
+        if not timesteps:  # strength 0: nothing to denoise
+            return self._decode(init)
+        latents = self.schedule.add_noise(init, self._initial_noise(len(prompts), generator), timesteps[0])
+        latents = self._denoise(latents, solver, timesteps, cond, uncond, guidance_scale, generator, callback)
+        return self._decode(latents)
