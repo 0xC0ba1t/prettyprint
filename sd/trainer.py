@@ -108,6 +108,8 @@ class LDMTrainer:
     def loss_on_batch(self, batch: Dict) -> torch.Tensor:
         z = batch["latent"].to(self.device)
         captions = list(batch["caption"])
+        # Caption dropout teaches the model an unconditional distribution for classifier-free guidance.
+        captions = ["" if random.random() < self.tc.cond_drop_prob else c for c in captions]
         ids = self.tokenizer(captions).to(self.device)
         noise = torch.randn_like(z)
         t = torch.randint(0, self.schedule.num_timesteps, (z.shape[0],), device=self.device)
@@ -116,6 +118,14 @@ class LDMTrainer:
         with self._autocast():
             pred = self.unet(z_t, t, self.text_encoder(ids))
         loss = F.mse_loss(pred.float(), target.float(), reduction="none").mean(dim=(1, 2, 3))
+        gamma = self.tc.min_snr_gamma
+        if gamma > 0:  # Min-SNR-gamma weighting (Hang et al. 2023): faster, better-balanced convergence
+            snr = self.schedule.snr(t)
+            if self.schedule.prediction_type == "epsilon":
+                weight = torch.clamp(snr, max=gamma) / snr
+            else:
+                weight = torch.clamp(snr, max=gamma) / (snr + 1.0)
+            loss = loss * weight
         return loss.mean()
 
     def train_step(self, batches: Iterator[Dict]) -> float:
