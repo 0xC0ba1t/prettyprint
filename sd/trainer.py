@@ -16,6 +16,7 @@ from .ema import EMA
 from .schedulers import NoiseSchedule
 from .tokenizer import TextTokenizer
 from .utils import cosine_warmup, save_checkpoint
+from .utils import load_checkpoint
 
 
 class LDMTrainer:
@@ -164,4 +165,53 @@ class LDMTrainer:
                 pbar.set_postfix(loss=f"{recent:.4f}", lr=f"{self.lr_scheduler.get_last_lr()[0]:.2e}")
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps({"step": self.step, "loss": recent, "lr": self.lr_scheduler.get_last_lr()[0]}) + "\n")
+            if self.step % self.tc.sample_every == 0 and self.on_sample is not None:
+                self.set_train(False)
+                with self.ema_scope():
+                    self.on_sample(self)
+                self.set_train(True)
+            if self.step % self.tc.ckpt_every == 0 or self.step == max_steps:
+                self.save()
         pbar.close()
+
+    # ------------------------------------------------------------------ checkpointing (Colab-safe)
+    def _model_state(self) -> Dict[str, torch.Tensor]:
+        state = self.modules.state_dict()
+        if self.lora_only:
+            state = {k: v for k, v in state.items() if "lora_" in k}
+        return state
+
+    def save(self, name: str = "latest.pt") -> str:
+        path = os.path.join(self.tc.out_dir, name)
+        save_checkpoint(
+            {
+                "step": self.step,
+                "model": self._model_state(),
+                "ema": self.ema.state_dict() if self.ema is not None else None,
+                "optimizer": self.optimizer.state_dict(),
+                "lr_scheduler": self.lr_scheduler.state_dict(),
+                "scaler": self.scaler.state_dict(),
+                "config": self.cfg.to_dict(),
+                "scale_factor": self.scale_factor,
+            },
+            path,
+        )
+        return path
+
+    def load(self, path: str) -> None:
+        ckpt = load_checkpoint(path, map_location=self.device)
+        self.modules.load_state_dict(ckpt["model"], strict=not self.lora_only)
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+        self.scaler.load_state_dict(ckpt["scaler"])
+        if self.ema is not None and ckpt.get("ema"):
+            self.ema.load_state_dict(ckpt["ema"])
+        self.step = ckpt["step"]
+
+    def maybe_resume(self) -> bool:
+        """Pick up from <out_dir>/latest.pt if it exists (so a disconnected Colab session just continues)."""
+        path = os.path.join(self.tc.out_dir, "latest.pt")
+        if os.path.exists(path):
+            self.load(path)
+            return True
+        return False
