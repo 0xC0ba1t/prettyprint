@@ -13,6 +13,7 @@ from .tokenizer import TextTokenizer
 from .unet import UNet
 from .utils import fit_image, load_checkpoint, pil_to_tensor, tensor_to_pil
 from .vae import AutoencoderKL
+import torch.nn.functional as F
 
 Prompt = Union[str, Sequence[str]]
 
@@ -120,10 +121,18 @@ class LatentDiffusionPipeline:
         guidance_scale: float,
         generator: Optional[torch.Generator] = None,
         callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
+        mask: Optional[torch.Tensor] = None,
+        init_latents: Optional[torch.Tensor] = None,
+        noise: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         for i, t in enumerate(timesteps):
             model_out = self._predict(latents, t, cond, uncond, guidance_scale)
             latents = sampler.step(model_out, t, latents, generator)
+            if mask is not None:
+                # Keep the known region on the forward-noised original; only the masked region is generated.
+                t_prev = sampler.prev_timestep(t)
+                known = self.schedule.add_noise(init_latents, noise, t_prev) if t_prev >= 0 else init_latents
+                latents = mask * latents + (1.0 - mask) * known
             if callback is not None:
                 callback(i, t, latents)
         return latents
@@ -192,3 +201,53 @@ class LatentDiffusionPipeline:
         latents = self.schedule.add_noise(init, self._initial_noise(len(prompts), generator), timesteps[0])
         latents = self._denoise(latents, solver, timesteps, cond, uncond, guidance_scale, generator, callback)
         return self._decode(latents)
+
+    # ------------------------------------------------------------------ inpainting
+    def _latent_mask(self, mask: Image.Image) -> torch.Tensor:
+        """White = repaint. Max-pooled to latent resolution so any touched latent cell is regenerated."""
+        m = pil_to_tensor(fit_image(mask.convert("L").convert("RGB"), self.image_size, Image.NEAREST))[:1]
+        m = ((m + 1.0) / 2.0 > 0.5).float().unsqueeze(0)
+        return F.adaptive_max_pool2d(m, self.latent_size).to(self.device)
+
+    @torch.no_grad()
+    def inpaint(
+        self,
+        prompt: Prompt,
+        image: Image.Image,
+        mask: Image.Image,
+        strength: float = 1.0,
+        negative_prompt: Prompt = "",
+        num_images: int = 1,
+        num_inference_steps: int = 30,
+        guidance_scale: float = 5.0,
+        sampler: str = "dpmpp",
+        seed: Optional[int] = None,
+        composite: bool = True,
+        callback=None,
+    ) -> List[Image.Image]:
+        """Regenerate the white region of `mask` while keeping the rest of `image`.
+
+        At every step the unmasked latents are reset to the original image noised to the matching level,
+        so the model only has to be consistent with the surroundings. With `composite=True` the untouched
+        pixels are also copied back from the source, avoiding any VAE round-trip loss outside the mask.
+        """
+        prompts = self._as_list(prompt, num_images)
+        cond, uncond = self.encode_prompts(prompts, negative_prompt)
+        generator = self._generator(seed)
+        solver = make_sampler(sampler, self.schedule)
+        solver.set_timesteps(num_inference_steps)
+        timesteps = solver.timesteps_for_strength(strength)
+        init = self._encode_image(image, len(prompts), generator)
+        latent_mask = self._latent_mask(mask)
+        noise = self._initial_noise(len(prompts), generator)
+        latents = self.schedule.add_noise(init, noise, timesteps[0]) if timesteps else init
+        latents = self._denoise(
+            latents, solver, timesteps, cond, uncond, guidance_scale, generator, callback,
+            mask=latent_mask, init_latents=init, noise=noise,
+        )
+        results = self._decode(latents)
+        if composite:
+            source = fit_image(image, self.image_size)
+            pixel_mask = fit_image(mask.convert("L").convert("RGB"), self.image_size, Image.NEAREST).convert("L")
+            results = [Image.composite(r, source, pixel_mask) for r in results]
+        return results
