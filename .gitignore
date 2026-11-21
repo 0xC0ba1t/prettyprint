@@ -174,3 +174,9 @@ cython_debug/
 /.idea
 /.vscode
 /.gnupg
+# Project artefacts
+cache/
+runs/
+outputs/
+*.pt
+*.ckpt
