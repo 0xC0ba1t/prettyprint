@@ -1,7 +1,7 @@
 # Default configuration: 128px text-to-image on a free Colab T4 (16 GB, fp16).
 # Anything omitted falls back to the dataclass defaults in sd/config.py.
 data:
-  dataset: lambdalabs/pokemon-blip-captions
+  dataset: diffusers/pokemon-gpt4-captions
   image_size: 128
 
 vae:

@@ -47,7 +47,7 @@ python scripts/sample.py --ldm runs/ldm/latest.pt --vae runs/vae/vae.pt --tokeni
     --prompt "a blue water monster" --num 4
 ```
 
-The default dataset is [`lambdalabs/pokemon-blip-captions`](https://huggingface.co/datasets/lambdalabs/pokemon-blip-captions).
+The default dataset is [`diffusers/pokemon-gpt4-captions`](https://huggingface.co/datasets/diffusers/pokemon-gpt4-captions).
 To use your own images set `data.folder` in the config: a directory of images with optional `name.txt` captions.
 
 ### img2img, inpainting, LoRA

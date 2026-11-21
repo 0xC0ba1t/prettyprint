@@ -60,7 +60,7 @@ class DiffusionConfig:
 
 @dataclass
 class DataConfig:
-    dataset: str = "lambdalabs/pokemon-blip-captions"
+    dataset: str = "diffusers/pokemon-gpt4-captions"
     split: str = "train"
     image_column: str = "image"
     text_column: str = "text"
